@@ -215,7 +215,14 @@ pub async fn run(
 
     let app = app.with_state(app_state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], config.server.port));
+    // Bind to the configured host (HOST / server.host); it was hard-coded to 0.0.0.0, ignoring the setting.
+    let ip: std::net::IpAddr = config.server.host.parse().map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("server.host {:?} is not an IP address: {e}", config.server.host),
+        )
+    })?;
+    let addr = SocketAddr::new(ip, config.server.port);
     tracing::info!("Mouchak Mail Server starting on {}", addr);
     tracing::info!("Health check: http://{}/health", addr);
 
