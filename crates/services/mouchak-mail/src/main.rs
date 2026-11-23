@@ -842,7 +842,32 @@ fn handle_install_alias(force: bool) -> anyhow::Result<()> {
 // ============================================================================
 
 /// Find the PID of the process listening on a given port.
+/// Windows has no lsof: `netstat -ano -p TCP` lists each listener with its PID.
+#[cfg(windows)]
+fn find_pid_on_port(port: u16) -> Option<u32> {
+    let output = std::process::Command::new("netstat")
+        .args(["-ano", "-p", "TCP"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let suffix = format!(":{}", port);
+    stdout.lines().find_map(|line| {
+        // "  TCP    127.0.0.1:8765    0.0.0.0:0    LISTENING    1234"
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() >= 5 && cols[0] == "TCP" && cols[1].ends_with(&suffix) && cols[3] == "LISTENING" {
+            cols[4].parse::<u32>().ok()
+        } else {
+            None
+        }
+    })
+}
+
+/// Find the PID of the process listening on a given port.
 /// Uses lsof on macOS/Linux.
+#[cfg(not(windows))]
 fn find_pid_on_port(port: u16) -> Option<u32> {
     let output = std::process::Command::new("lsof")
         .args(["-ti", &format!(":{}", port)])
@@ -861,7 +886,22 @@ fn find_pid_on_port(port: u16) -> Option<u32> {
     }
 }
 
+/// Kill a process by PID. Windows has no SIGTERM for a console process without a window: taskkill /F ends it.
+#[cfg(windows)]
+fn kill_process(pid: u32) -> std::io::Result<()> {
+    let status = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .stdout(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!("Failed to kill process {}", pid)))
+    }
+}
+
 /// Kill a process by PID.
+#[cfg(not(windows))]
 fn kill_process(pid: u32) -> std::io::Result<()> {
     let status = std::process::Command::new("kill")
         .args(["-TERM", &pid.to_string()])
