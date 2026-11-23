@@ -947,9 +947,21 @@ async fn handle_service_start(
             // Let's pass --no-ui to minimize issues.
             .arg("--no-ui");
 
-        // Detach properly
+        // Detach properly: no stdio of ours (on Windows an inherited handle kept the caller's pipe open, so a
+        // caller waiting for our output, such as a test harness, never saw it close), and on Windows its own
+        // process group with no console.
+        cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        }
+        // This process exits right after: its own console handles need not reach the server.
+        mouchak_mail_core::utils::disable_std_handle_inheritance();
 
         match cmd.spawn() {
             Ok(_) => {

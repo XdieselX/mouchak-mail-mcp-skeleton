@@ -89,6 +89,35 @@ pub fn slugify(text: &str) -> String {
     slug::slugify(text)
 }
 
+/// Stop this process's stdin, stdout and stderr from being inherited by children it spawns.
+///
+/// On Windows a child inherits every inheritable handle of its parent, whatever its own stdio is set to; a detached
+/// background server started by `service start` kept its caller's output pipe open, so a caller waiting for that
+/// output to end (a test harness, a script) waited for the server to die. Call it just before spawning a detached
+/// child from a process that exits right after. Elsewhere it does nothing.
+#[cfg(windows)]
+#[allow(unsafe_code)] // FFI: SetHandleInformation has no safe wrapper in windows-sys.
+pub fn disable_std_handle_inheritance() {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+    for h in [
+        std::io::stdin().as_raw_handle(),
+        std::io::stdout().as_raw_handle(),
+        std::io::stderr().as_raw_handle(),
+    ] {
+        if !h.is_null() {
+            // SAFETY: the handles are this process's own standard handles; only their inherit flag changes.
+            unsafe {
+                SetHandleInformation(h as _, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
+}
+
+/// See the Windows version: elsewhere a child's stdio set to null is enough.
+#[cfg(not(windows))]
+pub fn disable_std_handle_inheritance() {}
+
 pub mod image_processing;
 pub mod mistake_detection;
 pub mod pathspec;
