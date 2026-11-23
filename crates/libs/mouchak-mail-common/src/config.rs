@@ -208,7 +208,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             server: ServerConfig {
-                host: "0.0.0.0".to_string(),
+                host: "127.0.0.1".to_string(),
                 port: 8765,
                 auth_hmac: None,
                 serve_ui: true,
@@ -239,7 +239,7 @@ impl AppConfig {
 
         let mut builder = Config::builder()
             // Start with defaults
-            .set_default("server.host", "0.0.0.0")?
+            .set_default("server.host", "127.0.0.1")?
             .set_default("server.port", 8765)?
             .set_default("server.serve_ui", true)?
             .set_default("mcp.transport", "stdio")?
