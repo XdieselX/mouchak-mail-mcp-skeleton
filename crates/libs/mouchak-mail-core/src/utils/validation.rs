@@ -263,8 +263,8 @@ pub fn sanitize_agent_name(input: &str) -> String {
 /// assert!(validate_project_key("relative/path").is_err()); // Neither absolute nor human_key
 /// ```
 pub fn validate_project_key(key: &str) -> Result<(), ValidationError> {
-    // Check if it's an absolute path
-    if key.starts_with('/') {
+    // Check if it's an absolute path (Unix "/...", or Windows "C:\..." / "C:/..." / "\\server\share")
+    if key.starts_with('/') || std::path::Path::new(key).is_absolute() {
         if std::path::Path::new(key).exists() {
             return Ok(());
         }
