@@ -140,7 +140,10 @@ pub fn get_hooks_dir(repo_path: &Path) -> PathBuf {
 
         // Relative path - resolve from repo root
         if let Some(toplevel) = git_config(repo_path, &["rev-parse", "--show-toplevel"]) {
-            let resolved = PathBuf::from(&toplevel).join(&hooks_path);
+            // git prints the top level with forward slashes on Windows ("C:/..."): canonicalize it so the result
+            // matches the platform's own form (and symlinked temp dirs on macOS).
+            let root = std::fs::canonicalize(&toplevel).unwrap_or_else(|_| PathBuf::from(&toplevel));
+            let resolved = root.join(&hooks_path);
             debug!(
                 hooks_path = %hooks_path,
                 toplevel = %toplevel,
