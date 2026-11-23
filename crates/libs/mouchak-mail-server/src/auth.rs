@@ -16,6 +16,7 @@ use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 use crate::AppState;
+use mouchak_mail_core::model::agent_capabilities::CAP_FILE_RESERVATION;
 
 /// Authenticated user information stored as request extension
 #[derive(Debug, Clone)]
@@ -90,20 +91,57 @@ impl AuthConfig {
     }
 }
 
-/// JWKS Key structure
+/// JWKS Key structure: RSA keys carry `n` and `e`; OKP keys (Ed25519) carry `crv` and `x`.
 #[derive(Debug, Deserialize, Clone)]
 #[allow(dead_code)]
 struct Jwk {
     kid: String,
     kty: String,
     alg: Option<String>,
-    n: String,
-    e: String,
+    n: Option<String>,
+    e: Option<String>,
+    crv: Option<String>,
+    x: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct JwksResponse {
     keys: Vec<Jwk>,
+}
+
+/// The verifying keys of a JWKS document, by `kid`.
+///
+/// The document may be a bare JWK Set (`{"keys":[...]}`) or wrapped in an `{ok, value}` envelope
+/// (`{"ok":true,"value":{"keys":[...]}}`, the shape QDAG's gateway serves at `/api/v1/auth/jwks`). RSA keys
+/// (`kty: "RSA"`) and Ed25519 keys (`kty: "OKP"`, `crv: "Ed25519"`, signing with EdDSA) are accepted; any other
+/// key, or one missing its components, is skipped.
+fn decoding_keys_from_jwks(doc: &serde_json::Value) -> HashMap<String, DecodingKey> {
+    let set = if doc.get("keys").is_some() {
+        doc
+    } else {
+        doc.get("value").unwrap_or(doc)
+    };
+    let mut out = HashMap::new();
+    let Ok(parsed) = serde_json::from_value::<JwksResponse>(set.clone()) else {
+        return out;
+    };
+    for jwk in parsed.keys {
+        let key = match jwk.kty.as_str() {
+            "RSA" => match (jwk.n.as_deref(), jwk.e.as_deref()) {
+                (Some(n), Some(e)) => DecodingKey::from_rsa_components(n, e).ok(),
+                _ => None,
+            },
+            "OKP" if jwk.crv.as_deref() == Some("Ed25519") => jwk
+                .x
+                .as_deref()
+                .and_then(|x| DecodingKey::from_ed_components(x).ok()),
+            _ => None,
+        };
+        if let Some(key) = key {
+            out.insert(jwk.kid.clone(), key);
+        }
+    }
+    out
 }
 
 /// JWKS Client for fetching and caching keys with TTL-based refresh
@@ -171,17 +209,10 @@ impl JwksClient {
             .get(&self.url)
             .send()
             .await?
-            .json::<JwksResponse>()
+            .json::<serde_json::Value>()
             .await?;
 
-        let mut new_keys = HashMap::new();
-        for jwk in resp.keys {
-            if jwk.kty == "RSA"
-                && let Ok(decoding_key) = DecodingKey::from_rsa_components(&jwk.n, &jwk.e)
-            {
-                new_keys.insert(jwk.kid.clone(), decoding_key);
-            }
-        }
+        let new_keys = decoding_keys_from_jwks(&resp);
 
         // Update keys and refresh timestamp
         let mut keys = self.keys.write().await;
@@ -355,15 +386,20 @@ pub fn get_required_capability(path: &str) -> Option<&'static str> {
         "/api/message/acknowledge" | "/api/acknowledge_message" => Some("acknowledge_message"),
         "/api/message/read" | "/api/mark_message_read" => Some("fetch_inbox"),
         "/api/messages/search" | "/api/search_messages" => Some("fetch_inbox"),
-        // File reservations
-        "/api/file_reservations/paths" | "/api/file_reservation_paths" => Some("file_reservation"),
+        // File reservations: the same capability string the defaults grant and the MCP tools check
+        // (`file_reservation_paths`); the REST routes used to require "file_reservation", which nothing ever granted.
+        "/api/file_reservations/paths" | "/api/file_reservation_paths" => {
+            Some(CAP_FILE_RESERVATION)
+        }
         "/api/file_reservations/list" | "/api/list_file_reservations" | "/api/reservations" => {
-            Some("file_reservation")
+            Some(CAP_FILE_RESERVATION)
         }
         "/api/file_reservations/release" | "/api/release_file_reservation" => {
-            Some("file_reservation")
+            Some(CAP_FILE_RESERVATION)
         }
-        "/api/file_reservations/renew" | "/api/renew_file_reservation" => Some("file_reservation"),
+        "/api/file_reservations/renew" | "/api/renew_file_reservation" => {
+            Some(CAP_FILE_RESERVATION)
+        }
         "/api/file_reservations/force_release" | "/api/force_release_file_reservation" => {
             Some("admin")
         }
@@ -1329,5 +1365,220 @@ mod tests {
             !super::is_localhost(&external),
             "2001:db8::1 should not be localhost"
         );
+    }
+
+    // --- Ed25519 (OKP) keys and the {ok, value} envelope (QDAG's gateway JWKS) ---
+
+    /// An Ed25519 key pair: the encoding key and its JWKS, bare or wrapped in QDAG's `{ok, value}` envelope.
+    fn generate_ed25519_keys(kid: &str, enveloped: bool) -> (EncodingKey, String) {
+        use ring::{
+            rand::SystemRandom,
+            signature::{Ed25519KeyPair, KeyPair},
+        };
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).expect("pkcs8");
+        let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("key pair");
+        let x = URL_SAFE_NO_PAD.encode(pair.public_key().as_ref());
+        let set = format!(
+            r#"{{"keys":[{{"kty":"OKP","crv":"Ed25519","kid":"{kid}","alg":"EdDSA","use":"sig","x":"{x}"}}]}}"#
+        );
+        let doc = if enveloped {
+            format!(r#"{{"ok":true,"value":{set},"meta":{{"versionServed":""}}}}"#)
+        } else {
+            set
+        };
+        (EncodingKey::from_ed_der(pkcs8.as_ref()), doc)
+    }
+
+    fn ed25519_jwt(
+        key: &EncodingKey,
+        kid: &str,
+        sub: &str,
+        exp: usize,
+        aud: Option<&str>,
+    ) -> String {
+        let claims = Claims {
+            sub: sub.to_string(),
+            exp,
+            iss: Some("qdag-gateway".to_string()),
+            aud: aud.map(str::to_string),
+            iat: Some(chrono::Utc::now().timestamp() as usize),
+            nbf: None,
+            jti: None,
+        };
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some(kid.to_string());
+        encode(&header, &claims, key).expect("EdDSA JWT")
+    }
+
+    async fn agent_name_handler(
+        axum::Extension(user): axum::Extension<AuthenticatedUser>,
+    ) -> String {
+        user.agent_name.unwrap_or_default()
+    }
+
+    /// Serve `jwks` from a mock server and call `/` with `token` through the JWT middleware.
+    async fn call_with_jwt(
+        jwks: String,
+        token: &str,
+        audience: Option<&str>,
+    ) -> (StatusCode, String) {
+        let mock_server = MockServer::start().await;
+        Mock::given(path("/api/v1/auth/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(jwks))
+            .mount(&mock_server)
+            .await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo_root = temp_dir.path().join("archive");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        let db = libsql::Builder::new_local(temp_dir.path().join("test.db"))
+            .build()
+            .await
+            .unwrap();
+        let mm = crate::ModelManager::new_for_test(
+            db.connect().unwrap(),
+            repo_root,
+            Arc::new(AppConfig::default()),
+        );
+        let jwks_url = format!("{}/api/v1/auth/jwks", mock_server.uri());
+        let app_state = AppState {
+            mm,
+            metrics_handle: crate::setup_metrics(),
+            start_time: std::time::Instant::now(),
+            auth_config: AuthConfig {
+                mode: AuthMode::Jwt,
+                bearer_token: None,
+                jwks_url: Some(jwks_url.clone()),
+                jwt_audience: audience.map(str::to_string),
+                jwt_issuer: Some("qdag-gateway".to_string()),
+                allow_localhost: false,
+            },
+            jwks_client: Some(JwksClient::new(jwks_url)),
+            ratelimit_config: crate::ratelimit::RateLimitConfig::new(),
+        };
+        let app = Router::new()
+            .route("/", get(agent_name_handler))
+            .layer(middleware::from_fn_with_state(app_state, auth_middleware));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        (status, String::from_utf8_lossy(&body).to_string())
+    }
+
+    fn in_one_hour() -> usize {
+        (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize
+    }
+
+    #[tokio::test]
+    async fn test_auth_jwt_ed25519_bare_jwks() {
+        let (key, jwks) = generate_ed25519_keys("qdag-identity-ed25519-v1", false);
+        let token = ed25519_jwt(
+            &key,
+            "qdag-identity-ed25519-v1",
+            "copilot",
+            in_one_hour(),
+            None,
+        );
+        let (status, agent) = call_with_jwt(jwks, &token, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(agent, "copilot", "the token's sub is the agent name");
+    }
+
+    #[tokio::test]
+    async fn test_auth_jwt_ed25519_enveloped_jwks() {
+        let (key, jwks) = generate_ed25519_keys("qdag-identity-ed25519-v1", true);
+        let token = ed25519_jwt(
+            &key,
+            "qdag-identity-ed25519-v1",
+            "codex",
+            in_one_hour(),
+            Some("qdag-mail-hub"),
+        );
+        let (status, agent) = call_with_jwt(jwks, &token, Some("qdag-mail-hub")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(agent, "codex");
+    }
+
+    #[tokio::test]
+    async fn test_auth_jwt_ed25519_wrong_audience_refused() {
+        let (key, jwks) = generate_ed25519_keys("k-aud", true);
+        let token = ed25519_jwt(
+            &key,
+            "k-aud",
+            "copilot",
+            in_one_hour(),
+            Some("another-service"),
+        );
+        let (status, _) = call_with_jwt(jwks, &token, Some("qdag-mail-hub")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_auth_jwt_ed25519_expired_refused() {
+        let (key, jwks) = generate_ed25519_keys("k-exp", true);
+        let an_hour_ago = (chrono::Utc::now() - chrono::Duration::hours(1)).timestamp() as usize;
+        let token = ed25519_jwt(&key, "k-exp", "copilot", an_hour_ago, None);
+        let (status, _) = call_with_jwt(jwks, &token, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_auth_jwt_ed25519_other_key_refused() {
+        // A token signed by a different Ed25519 key under the same kid.
+        let (_, jwks) = generate_ed25519_keys("k-same", false);
+        let (other, _) = generate_ed25519_keys("k-same", false);
+        let token = ed25519_jwt(&other, "k-same", "copilot", in_one_hour(), None);
+        let (status, _) = call_with_jwt(jwks, &token, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_decoding_keys_from_jwks_shapes_and_kinds() {
+        let (_, rsa_jwks) = generate_test_keys("rsa-1");
+        let (_, ed_bare) = generate_ed25519_keys("ed-1", false);
+        let rsa: serde_json::Value = serde_json::from_str(&rsa_jwks).unwrap();
+        let ed: serde_json::Value = serde_json::from_str(&ed_bare).unwrap();
+        // Both kinds in one set, wrapped in the envelope, plus keys that must be skipped.
+        let mut keys = rsa["keys"].as_array().unwrap().clone();
+        keys.extend(ed["keys"].as_array().unwrap().iter().cloned());
+        keys.push(serde_json::json!({"kty":"OKP","crv":"X25519","kid":"x25519","x":"AAAA"}));
+        keys.push(serde_json::json!({"kty":"EC","crv":"P-256","kid":"ec"}));
+        keys.push(serde_json::json!({"kty":"RSA","kid":"rsa-no-e","n":"AQAB"}));
+        let doc = serde_json::json!({"ok": true, "value": {"keys": keys}});
+        let found = super::decoding_keys_from_jwks(&doc);
+        let mut kids: Vec<_> = found.keys().cloned().collect();
+        kids.sort();
+        assert_eq!(kids, vec!["ed-1".to_string(), "rsa-1".to_string()]);
+        // A document with neither shape gives no keys rather than an error.
+        assert!(super::decoding_keys_from_jwks(&serde_json::json!({"ok": false})).is_empty());
+    }
+
+    #[test]
+    fn test_file_reservation_routes_require_the_granted_capability() {
+        // The defaults grant CAP_FILE_RESERVATION ("file_reservation_paths"); the routes must ask for the same.
+        for route in [
+            "/api/file_reservations/paths",
+            "/api/file_reservation_paths",
+            "/api/file_reservations/list",
+            "/api/file_reservations/release",
+            "/api/file_reservations/renew",
+        ] {
+            assert_eq!(
+                super::get_required_capability(route),
+                Some(CAP_FILE_RESERVATION),
+                "{route}"
+            );
+        }
     }
 }

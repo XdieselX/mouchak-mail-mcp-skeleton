@@ -65,6 +65,8 @@ tower = { version = "0.5", features = ["util"] }
 wiremock = "0.6"
 rand = "0.8"
 rsa = "0.9"
+# Ed25519 test keys for the EdDSA JWKS path (already in the lock through jsonwebtoken)
+ring = "0.17"
 hyper = { version = "1", features = ["full"] }
 http-body-util = "0.1"
 

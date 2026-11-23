@@ -634,6 +634,13 @@ impl AgentBmc {
             .await?;
         stmt.execute([agent_id.get()]).await?;
 
+        // 6b. Delete agent_capabilities: every registered agent holds the defaults (both registration paths grant
+        // them), and the foreign key otherwise refuses deleting the agent row.
+        let stmt = db
+            .prepare("DELETE FROM agent_capabilities WHERE agent_id = ?")
+            .await?;
+        stmt.execute([agent_id.get()]).await?;
+
         // 7. Delete the agent
         let stmt = db.prepare("DELETE FROM agents WHERE id = ?").await?;
         stmt.execute([agent_id.get()]).await?;

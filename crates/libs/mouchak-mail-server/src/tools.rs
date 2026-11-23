@@ -218,6 +218,16 @@ pub async fn register_agent(
 
     let agent_id = mouchak_mail_core::model::agent::AgentBmc::create(&ctx, mm, agent_c).await?;
 
+    // Grant the default capabilities, as the MCP `register_agent` tool does. Without them an agent registered
+    // through this route could not send, read its inbox or reserve files over MCP ("does not have 'send_message'
+    // capability"): the QDAG hub's standing identities were registered here and had none.
+    mouchak_mail_core::model::agent_capabilities::AgentCapabilityBmc::grant_defaults(
+        &ctx,
+        mm,
+        agent_id.get(),
+    )
+    .await?;
+
     // Fetch the full agent to return
     let agent = mouchak_mail_core::model::agent::AgentBmc::get(&ctx, mm, agent_id).await?;
 

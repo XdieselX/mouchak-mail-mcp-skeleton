@@ -337,6 +337,45 @@ mod agent_tests {
     }
 
     #[tokio::test]
+    async fn test_register_agent_grants_the_default_capabilities() {
+        use mouchak_mail_core::ctx::Ctx;
+        use mouchak_mail_core::model::agent_capabilities::{
+            AgentCapabilityBmc, DEFAULT_CAPABILITIES,
+        };
+
+        let (state, _temp) = create_test_state().await;
+        let project_slug = setup_with_project(&state).await;
+
+        let app = Router::new()
+            .route("/api/agent/register", post(tools::register_agent))
+            .with_state(state.clone());
+        let (status, body) = post_json(
+            app,
+            "/api/agent/register",
+            json!({
+                "project_slug": project_slug,
+                "name": "CapAgent",
+                "program": "test",
+                "model": "test"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let ctx = Ctx::root_ctx();
+        let granted =
+            AgentCapabilityBmc::list_for_agent(&ctx, &state.mm, body["id"].as_i64().unwrap())
+                .await
+                .unwrap();
+        let mut names: Vec<&str> = granted.iter().map(|c| c.capability.as_str()).collect();
+        names.sort_unstable();
+        let mut expected: Vec<&str> = DEFAULT_CAPABILITIES.to_vec();
+        expected.sort_unstable();
+        assert_eq!(DEFAULT_CAPABILITIES.len(), 4);
+        assert_eq!(names, expected, "the REST route grants the four defaults");
+    }
+
+    #[tokio::test]
     async fn test_whois_agent() {
         let (state, _temp) = create_test_state().await;
         let project_slug = setup_with_project(&state).await;
