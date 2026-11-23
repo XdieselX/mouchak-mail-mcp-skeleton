@@ -1586,19 +1586,19 @@ mod tests {
             paths
                 .inboxes
                 .iter()
-                .any(|p| p.to_string_lossy().contains("alice/inbox"))
+                .any(|p| p.to_string_lossy().replace('\\', "/").contains("alice/inbox"))
         );
         assert!(
             paths
                 .inboxes
                 .iter()
-                .any(|p| p.to_string_lossy().contains("bob/inbox"))
+                .any(|p| p.to_string_lossy().replace('\\', "/").contains("bob/inbox"))
         );
         assert!(
             paths
                 .inboxes
                 .iter()
-                .any(|p| p.to_string_lossy().contains("charlie/inbox"))
+                .any(|p| p.to_string_lossy().replace('\\', "/").contains("charlie/inbox"))
         );
     }
 

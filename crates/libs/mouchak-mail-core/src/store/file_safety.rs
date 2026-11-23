@@ -217,6 +217,7 @@ mod tests {
         assert!(
             stored_path
                 .to_string_lossy()
+                .replace('\\', "/")
                 .contains("/data/attachments/42/")
         );
         assert!(stored_path.to_string_lossy().ends_with("_test.pdf"));

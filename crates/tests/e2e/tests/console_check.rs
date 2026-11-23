@@ -5,8 +5,10 @@ use jugar_probar::Browser;
 
 #[tokio::test]
 async fn test_console_errors() {
+    // The UI under test comes from TEST_WEB_UI_URL like every other e2e test (it was hard-coded to localhost:9765,
+    // where nothing listens unless a dev server was started by hand); 9765 stays the fallback.
     let config = TestConfig {
-        web_ui_url: "http://localhost:9765".to_string(),
+        web_ui_url: std::env::var("TEST_WEB_UI_URL").unwrap_or_else(|_| "http://localhost:9765".to_string()),
         ..Default::default()
     };
 
