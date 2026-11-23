@@ -196,6 +196,11 @@ pub async fn register_agent(
     let ctx = Ctx::root_ctx();
     let mm = &app_state.mm;
 
+    // The MCP tool validates agent names; the REST route did not, so a name with characters a file name cannot hold
+    // (e.g. `*` on Windows) reached the archive's directory creation and came back as a 500.
+    mouchak_mail_core::utils::validation::validate_agent_name(&payload.name)
+        .map_err(|e| crate::error::ServerError::Validation(e.to_string()))?;
+
     let project = mouchak_mail_core::model::project::ProjectBmc::get_by_identifier(
         &ctx,
         mm,
