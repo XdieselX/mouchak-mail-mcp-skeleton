@@ -46,7 +46,9 @@ pub async fn run_sse(config: AppConfig) -> Result<()> {
     use std::net::SocketAddr;
     use std::sync::Arc;
 
-    let addr: SocketAddr = format!("0.0.0.0:{}", config.mcp.port).parse()?;
+    // Bind to the configured host (HOST / server.host), as the HTTP server does; it was hard-coded to 0.0.0.0.
+    let ip: std::net::IpAddr = config.server.host.parse()?;
+    let addr = SocketAddr::new(ip, config.mcp.port);
     tracing::info!(
         "Starting Mouchak Mail server (HTTP/SSE mode) on http://{}",
         addr
